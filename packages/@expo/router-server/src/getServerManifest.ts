@@ -104,8 +104,11 @@ function uniqueBy<T>(arr: T[], key: (item: T) => string): T[] {
   });
 }
 
-// TODO(@hassankhan): ENG-16575
-type FlatNodeTuple = [contextKey: string, absoluteRoute: string, node: RouteNode];
+type FlatNode = {
+  contextKey: string;
+  absoluteRoute: string;
+  route: RouteNode;
+};
 
 type GetServerManifestOptions = {
   headers?: Record<string, string | string[]>;
@@ -116,7 +119,7 @@ export function getServerManifest(
   route: RouteNode,
   options: GetServerManifestOptions | undefined
 ): ExpoRouterServerManifestV1 {
-  function getFlatNodes(route: RouteNode, parentRoute: string = ''): FlatNodeTuple[] {
+  function getFlatNodes(route: RouteNode, parentRoute: string = ''): FlatNode[] {
     // Use a recreated route instead of contextKey because we duplicate nodes to support array syntax.
     const absoluteRoute = [parentRoute, route.route].filter(Boolean).join('/');
 
@@ -133,41 +136,48 @@ export function getServerManifest(
     } else {
       key = getNormalizedContextKey(absoluteRoute);
     }
-    return [[key, '/' + absoluteRoute, route]];
+
+    return [
+      {
+        contextKey: key,
+        absoluteRoute: '/' + absoluteRoute,
+        route,
+      },
+    ];
   }
 
   // Remove duplicates from the runtime manifest which expands array syntax.
   const flat = getFlatNodes(route)
-    .sort(([, , a], [, , b]) => sortRoutes(b, a))
+    .sort(({ route: a }, { route: b }) => sortRoutes(b, a))
     .reverse();
 
   const apiRoutes = uniqueBy(
-    flat.filter(([, , route]) => route.type === 'api'),
-    ([path]) => path
+    flat.filter(({ route }) => route.type === 'api'),
+    ({ contextKey }) => contextKey
   );
 
   const otherRoutes = uniqueBy(
     flat.filter(
-      ([, , route]) =>
+      ({ route }) =>
         route.type === 'route' ||
         (route.type === 'rewrite' && (route.methods === undefined || route.methods.includes('GET')))
     ),
-    ([path]) => path
+    ({ contextKey }) => contextKey
   );
 
   const redirects = uniqueBy(
-    flat.filter(([, , route]) => route.type === 'redirect'),
-    ([path]) => path
+    flat.filter(({ route }) => route.type === 'redirect'),
+    ({ contextKey }) => contextKey
   )
     .map((redirect) => {
       // TODO(@hassankhan): ENG-16577
       // For external redirects, use `destinationContextKey` as the destination URL
-      if (shouldLinkExternally(redirect[2].destinationContextKey!)) {
-        redirect[1] = redirect[2].destinationContextKey!;
+      if (shouldLinkExternally(redirect.route.destinationContextKey!)) {
+        redirect.absoluteRoute = redirect.route.destinationContextKey!;
       } else {
-        redirect[1] =
-          flat.find(([, , route]) => route.contextKey === redirect[2].destinationContextKey)?.[0] ??
-          '/';
+        redirect.absoluteRoute =
+          flat.find(({ route }) => route.contextKey === redirect.route.destinationContextKey)
+            ?.contextKey ?? '/';
       }
 
       return redirect;
@@ -175,20 +185,20 @@ export function getServerManifest(
     .reverse();
 
   const rewrites = uniqueBy(
-    flat.filter(([, , route]) => route.type === 'rewrite'),
-    ([path]) => path
+    flat.filter(({ route }) => route.type === 'rewrite'),
+    ({ contextKey }) => contextKey
   )
     .map((rewrite) => {
-      rewrite[1] =
-        flat.find(([, , route]) => route.contextKey === rewrite[2].destinationContextKey)?.[0] ??
-        '/';
+      rewrite.absoluteRoute =
+        flat.find(({ route }) => route.contextKey === rewrite.route.destinationContextKey)
+          ?.contextKey ?? '/';
 
       return rewrite;
     })
     .reverse();
 
-  const standardRoutes = otherRoutes.filter(([, , route]) => !isNotFoundRoute(route));
-  const notFoundRoutes = otherRoutes.filter(([, , route]) => isNotFoundRoute(route));
+  const standardRoutes = otherRoutes.filter(({ route }) => !isNotFoundRoute(route));
+  const notFoundRoutes = otherRoutes.filter(({ route }) => isNotFoundRoute(route));
 
   const manifest: ExpoRouterServerManifestV1 = {
     apiRoutes: getMatchableManifestForPaths(apiRoutes),
@@ -211,26 +221,24 @@ export function getServerManifest(
   return manifest;
 }
 
-function getMatchableManifestForPaths(
-  paths: [string, string, RouteNode][]
-): ExpoRouterServerManifestV1Route[] {
-  return paths.map(([normalizedRoutePath, absoluteRoute, node]) => {
+function getMatchableManifestForPaths(paths: FlatNode[]): ExpoRouterServerManifestV1Route[] {
+  return paths.map(({ contextKey, absoluteRoute, route }) => {
     const matcher: ExpoRouterServerManifestV1Route = getNamedRouteRegex(
-      normalizedRoutePath,
+      contextKey,
       absoluteRoute,
-      node.contextKey
+      route.contextKey
     );
 
-    if (node.generated) {
+    if (route.generated) {
       matcher.generated = true;
     }
 
-    if (node.permanent) {
+    if (route.permanent) {
       matcher.permanent = true;
     }
 
-    if (node.methods) {
-      matcher.methods = node.methods;
+    if (route.methods) {
+      matcher.methods = route.methods;
     }
 
     return matcher;
